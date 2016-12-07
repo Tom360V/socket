@@ -15,6 +15,8 @@
 
 #ifdef WINDOWS
   #include <winsock2.h>
+  #include <Windows.h>
+  #include <ws2tcpip.h>
 //  #pragma comment(lib,"ws2_32.lib") //Winsock Library
   #define socklen_t int
 #else
@@ -23,48 +25,52 @@
   #include <sys/socket.h>
   #include <netinet/in.h>
   #include <netdb.h>
+  #include <sys/ioctl.h>
+  #define ioctl ioctlsocket
 #endif
 #include "mysocket.h"
 
-static void error(const char *msg)
-{
-    perror(msg);
-    //perror(errno);
-//    exit(0);
-}
+Sock_fpHandles_t *pMySockHandles;
 
-commEngine_fpHandles_t *fpMySockHandles;
-driver_fpHandles_t Sock_Handles =
-{
-    &Sock_Send,
-};
-
-int16_t sockfd = -1;
 struct sockaddr_in serv_addr;
 
 //for server
 #define MAX_NOF_CLIENTS     (127)
 int16_t clientSockets[MAX_NOF_CLIENTS] = {0};
 
+#ifdef WINDOWS
+#define PRINT_WSA_ERROR     printf(", WSALastError::%d", WSAGetLastError());
+#else
+#define PRINT_WSA_ERROR
+#endif
 
-static void Received(uint8_t *data, int8_t n, int16_t handle)
+#if 1
+#define LOG_ERROR(...)  perror(__FUNCTION__);                   \
+                        printf("ERROR::%s:%s:", __FUNCTION__, strerror(errno) );    \
+                        printf(__VA_ARGS__);                    \
+                        PRINT_WSA_ERROR                         \
+                        printf("\r\n");                         \
+                        fflush(stdout);
+#else
+    LOG_ERROR()
+#endif
+
+#if 0
+#define LOG_INFO(...)   printf("INFO ::%s: ",__FUNCTION__); \
+                        printf(__VA_ARGS__);                \
+                        printf("\r\n");                     \
+                        fflush(stdout);
+#else
+#define LOG_INFO(...)
+#endif
+
+
+/******************************************************************************
+ *
+ */
+int8_t Sock_Init(Sock_fpHandles_t *pSockHandles)
 {
-    if( 0 != fpMySockHandles)
-    {
-        (fpMySockHandles->fpReceive)(data, n, handle);
-    }
-}
-
-int Sock_InitServer(int port, commEngine_fpHandles_t *pfpHandles)
-{
-    fpMySockHandles = pfpHandles;
-
-    if (port < 0)
-    {
-        error("ERROR, no port provided\n");
-        return -1;
-    }
-
+    pMySockHandles = pSockHandles;
 
 #ifdef WINDOWS
     WSADATA wsaData;
@@ -73,48 +79,68 @@ int Sock_InitServer(int port, commEngine_fpHandles_t *pfpHandles)
     int iResult = WSAStartup(MAKEWORD(2,2), &wsaData);
     if (iResult != 0)
     {
-        printf("WSAStartup failed: %d\n", iResult);
-        return 1;
+        LOG_ERROR("WSAStartup failed: %d", iResult);
+        return eSOCK_FAILED_TO_INIT;
     }
 #endif
+    return 0;
+}
 
-    //create master socket
+/******************************************************************************
+ *
+ */
+static void sock_Received(sockfd_t sockfd, uint8_t *data, int8_t n)
+{
+    if( 0 != pMySockHandles)
+    {
+        (pMySockHandles->fpReceive)((int16_t)sockfd, data, n);
+    }
+}
+
+/******************************************************************************
+ *
+ */
+sockfd_t Sock_SetupServer(int port)
+{
+    int16_t sockfd;
+
+    if (port < 0)
+    {
+        LOG_ERROR("invalid port");
+        return(eSOCK_INVALID_PORT);
+    }
+
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0)
     {
-        error("ERROR opening socket");
+        LOG_ERROR("invalid sockfd");
+        return eSOCK_INVALID_FD;
     }
-    else
-    {
-        //set address
-        memset((char *) &serv_addr, 0, sizeof(serv_addr));
-        serv_addr.sin_family = AF_INET;
-        serv_addr.sin_addr.s_addr = INADDR_ANY;
-        serv_addr.sin_port = htons(port);
 
-        //Bind socket to localhost with a specified port
-        if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0)
-        {
-            error("ERROR on binding");
-        }
-        else
-        {
-            if(listen(sockfd, MAX_NOF_CLIENTS) < 0)
-            {
-                error("ERROR on listen");
-            }
-            else
-            {
-                printf("\nReady for connections");
-                return sockfd;
-            }
-        }
+    //set address
+    memset((char *) &serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(port);
+    serv_addr.sin_addr.s_addr = INADDR_ANY;
+
+    //Bind socket to localhost with a specified port
+    if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0)
+    {
+        LOG_ERROR("failed to bind");
+        Sock_Close(sockfd);
+        return eSOCK_FAILED_TO_BIND;
     }
-    Sock_Close(sockfd);
-    return -1;
+
+    if(listen(sockfd, MAX_NOF_CLIENTS) < 0)
+    {
+        LOG_ERROR("failed to listen");
+        Sock_Close(sockfd);
+        return eSOCK_FAILED_TO_LISTEN;
+    }
+    return sockfd;
 }
 
-int Sock_ServerTask()
+int Sock_ServerTask(sockfd_t sockfd)
 {
     static uint8_t buffer[100] = {0};
 
@@ -156,7 +182,8 @@ int Sock_ServerTask()
 
     if ((activity < 0) && (errno!=EINTR))
     {
-        printf("select error");
+        LOG_ERROR("failed to select");
+        return eSOCK_FAILED_TO_SELECT;
     }
 
     //If something happened on the master socket , then its an incoming connection
@@ -165,18 +192,19 @@ int Sock_ServerTask()
         int newSockfd;
         if ((newSockfd = accept(sockfd, (struct sockaddr *)&serv_addr, (socklen_t*)&addrLength))<0)
         {
-            perror("accept");
-            exit(EXIT_FAILURE);
+            LOG_ERROR("failed to accept");
+            return eSOCK_FAILED_TO_ACCEPT;
         }
 
-/*
+        /*
         struct timeval tv;
         tv.tv_sec = 0;      // 30 Secs Timeout
         tv.tv_usec = 10;    // Not init'ing this can cause strange errors
         setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv,sizeof(struct timeval));
-*/
+         */
+
         //inform user of socket number - used in send and receive commands
-        printf("\nNew connection , socket fd is %d , ip is : %s , port : %d" , newSockfd , inet_ntoa(serv_addr.sin_addr) , ntohs(serv_addr.sin_port));
+        LOG_INFO("New connection , socket fd is %d , ip is : %s , port : %d" , newSockfd , inet_ntoa(serv_addr.sin_addr) , ntohs(serv_addr.sin_port));
 
         //add new socket to array of sockets
         for (i = 0; i < MAX_NOF_CLIENTS; i++)
@@ -185,10 +213,10 @@ int Sock_ServerTask()
             if( clientSockets[i] == 0 )
             {
                 clientSockets[i] = newSockfd;
-                //printf("\nAdding to list of sockets as %d" , i);
-                if( 0 != fpMySockHandles)
+                LOG_INFO("Adding to list of sockets as %d" , i);
+                if( 0 != pMySockHandles)
                 {
-                    (fpMySockHandles->fpNodeConnect)(newSockfd);
+                    (pMySockHandles->fpConnect)((int16_t)newSockfd);
                 }
                 break;
             }
@@ -205,148 +233,181 @@ int Sock_ServerTask()
             int valread;
 
             valread = recv(sd, (char*)buffer, 20, 0/*MSG_WAITALL*/);
-//            valread = read( sd , buffer, 100);
             if (valread <= 0)
             {
                 if(valread<0)
                 {
-                    printf("Socket Error!");
+                    LOG_ERROR("failed to receive");
+                    return eSOCK_FAILED_TO_READ;
                 }
                 //Somebody disconnected , get his details and print
                 getpeername(sd , (struct sockaddr*)&serv_addr , (socklen_t*)&addrLength);
-                printf("Host disconnected , ip %s , port %d \n" , inet_ntoa(serv_addr.sin_addr) , ntohs(serv_addr.sin_port));
+                LOG_INFO("Host disconnected , ip %s , port %d \n" , inet_ntoa(serv_addr.sin_addr) , ntohs(serv_addr.sin_port));
 
                 //Close the socket and mark as 0 in list for reuse
-                close( sd );
+                Sock_Close( sd );
                 clientSockets[i] = 0;
-                if( 0 != fpMySockHandles)
+                if( 0 != pMySockHandles)
                 {
-                    (fpMySockHandles->fpNodeDisconnect)(sd);
+                    (pMySockHandles->fpDisconnect)((int16_t)sd);
                 }
             }
             else
             {
                 //set the string terminating NULL byte on the end of the data read
                 buffer[valread] = '\0';
-                printf("\n--%s--",buffer);
-                Received((uint8_t *)&buffer[0], valread, sd);
+                LOG_INFO("--%s--",buffer);
+                sock_Received(sd, (uint8_t *)&buffer[0], valread);
             }
         }
     }
     return 0;
 }
 
+int8_t Sock_validateSocket(sockfd_t sockfd)
+{
+    int error = 0;
+    socklen_t len = sizeof (error);
+    if(0 > getsockopt (sockfd, SOL_SOCKET, SO_ERROR, (char*)&error, &len) )
+    {
+        LOG_ERROR("invalid sockfd:%d (getsockopt)", sockfd);
+        return eSOCK_INVALID_FD;
+    }
+    return 0;
+}
 
-int Sock_InitClient(char *host, int port, commEngine_fpHandles_t *pfpHandles)
+sockfd_t Sock_SetupClient(const char *host, int port)
 {
     struct sockaddr_in serv_addr;
     struct hostent *server;
-    fpMySockHandles = pfpHandles;
+    sockfd_t sockfd = -1;
 
-#ifdef WINDOWS
-    WSADATA wsaData;
-
-    // Initialize Winsock
-    int iResult = WSAStartup(MAKEWORD(2,2), &wsaData);
-    if (iResult != 0)
+    if (host==NULL)
     {
-        printf("WSAStartup failed: %d\n", iResult);
-        return 1;
+        LOG_ERROR("invalid host");
+        return eSOCK_INVALID_HOSTNAME;
     }
-#endif
+
+    server = gethostbyname(host);
+    if (server == NULL)
+    {
+        LOG_ERROR("hostname does not exist");
+        return eSOCK_HOSTNAME_DOES_NOT_EXIST;
+    }
 
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0)
     {
-        error("ERROR opening socket");
+        LOG_ERROR("invalid sockfd");
+        return eSOCK_INVALID_FD;
     }
-    else
+
+    memset((char *)&serv_addr, 0, sizeof(serv_addr));
+    memcpy((char *)&serv_addr.sin_addr.s_addr, (char *)server->h_addr, server->h_length);
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_port = htons(port);
+
+    if (0 != connect(sockfd,(struct sockaddr *) &serv_addr,sizeof(serv_addr)))
     {
-        if (host==NULL)
-        {
-            error("ERROR invalid hostname");
-        }
-        else
-        {
-            server = gethostbyname(host);
-            if (server == NULL)
-            {
-                error("ERROR, no such host\n");
-            }
-            else
-            {
-                memset((char *) &serv_addr, 0, sizeof(serv_addr));
-                serv_addr.sin_family = AF_INET;
-                memcpy((char *)&serv_addr.sin_addr.s_addr,
-                       (char *)server->h_addr,
-                       server->h_length);
-                serv_addr.sin_port = htons(port);
-                if (connect(sockfd,(struct sockaddr *) &serv_addr,sizeof(serv_addr)) < 0)
-                {
-                    error("ERROR connecting");
-                }
-                (fpMySockHandles->fpNodeConnect)(sockfd);
-
-                struct timeval tv;
-                tv.tv_sec = 30;  /* 30 Secs Timeout */
-                tv.tv_usec = 10;  // Not init'ing this can cause strange errors
-                setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv,sizeof(struct timeval));
-
-                printf("\nConnected to host: [ip]:%d, sockfd: %d", port, sockfd);
-                return sockfd;
-            }
-        }
+        LOG_ERROR("failed to connect");
+        Sock_Close(sockfd);
+        return eSOCK_FAILED_TO_CONNECT;
     }
-    Sock_Close(sockfd);
-    return -1;
+
+    //Trigger fpConnect!
+    if(0 != pMySockHandles)
+    {
+        (pMySockHandles->fpConnect)((int16_t)sockfd);
+    }
+
+    struct timeval tv;
+    tv.tv_sec = 5;  /* 30 Secs Timeout */
+    tv.tv_usec = 1;  // Not init'ing this can cause strange errors
+    if(0 > setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv,sizeof(struct timeval)))
+    {
+        LOG_ERROR("failed to set sockoptions, sockfd:%d", sockfd);
+        Sock_Close(sockfd);
+        return eSOCK_INVALID_FD;
+    }
+
+    if(0 > setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO , (char *)&tv,sizeof(struct timeval)))
+    {
+        LOG_ERROR("failed to set sockoptions, sockfd:%d", sockfd);
+        Sock_Close(sockfd);
+        return eSOCK_INVALID_FD;
+    }
+
+    LOG_INFO("Connected to host: %s:%d, sockfd: %d\r\n",
+                        inet_ntoa(serv_addr.sin_addr), port, sockfd);
+    return sockfd;
 }
 
-int Sock_Send(uint8_t *data, uint8_t length, int16_t handle)
+int Sock_Send(sockfd_t sockfd, uint8_t *data, size_t length)
 {
-    if(handle<0)
+    if(0 > sockfd)
     {
-        printf("\nERROR Sending to invalid socket: %d", handle);
+        LOG_ERROR("invalid sockfd");
+        return eSOCK_INVALID_FD;
     }
 
-    //int n = write((int)handle, (char*)data, (size_t)length);
-    int n = send((int)handle, (char*)data, (size_t)length, 0);
+    int n = send ((int)sockfd, (char*)data, (size_t)length, 0);
     if (0 > n )
     {
-        //printf("\nERROR (%d) writing to socket: %d\n", errno, handle);
-        error("Sock_Send: write failed");
+        LOG_ERROR("failed to send, send:%d (lastError:%d)", n, WSAGetLastError());
+        return eSOCK_FAILED_TO_SEND;
     }
+    LOG_INFO("Send Completed [%d]!", n);
     return n;
 }
 
-/*int Sock_SendClient(uint8_t *data, uint8_t length, int16_t handle)
+int Sock_DataAvailable(sockfd_t sockfd)
 {
-    if(sockfd<0)
-    {
-        error("ERROR invalid socket");
-    }
+#if 0
+    int retval;
+    fd_set rfds;
+    struct timeval tv;
+    tv.tv_sec  = 1;
+    tv.tv_usec = 1;
 
-    int n;
-    n = write(sockfd, data, length);
-    if (n < 0)
-    {
-         error("ERROR writing to socket");
-    }
-    return n;
-}*/
+    FD_ZERO(&rfds);
+    FD_SET(sockfd, &rfds);
+    retval = select(sockfd+1, &rfds, NULL, NULL, &tv);
 
-int Receive()
+    LOG_INFO("%i, %d", (sockfd_t)sockfd, retval);
+    if (retval == -1)
+    {
+        return 0;
+    }
+    return 1;
+
+#else
+    u_long count = 0;
+    ioctlsocket((int)sockfd, FIONREAD, (u_long*)&count);
+    LOG_INFO("socket: %d, count:%lu\r\n", sockfd, count);
+    return (count!=0);
+#endif
+}
+
+int Sock_ReadByte(sockfd_t sockfd, char *byte)
+{
+    int length = recv(sockfd, byte, 1, 0/*flags*/);
+    LOG_INFO("%d", length);
+    return length;
+}
+
+int Receive(sockfd_t sockfd)
 {
     static uint8_t recvBuffer[100] = {0};
     int n;
 
     if(sockfd<0)
     {
-        error("ERROR invalid socket");
+        LOG_ERROR("Invalid sockfd");
+        return eSOCK_INVALID_FD;
     }
 
     memset(&recvBuffer, 0, sizeof(recvBuffer));
     n = recv(sockfd, (char*)recvBuffer, sizeof(recvBuffer), 0);
-    //n = read(sockfd,&recvBuffer,sizeof(recvBuffer));
     if(n>0)
     {
 #ifdef X86
@@ -356,21 +417,25 @@ int Receive()
             printf("|%02X",recvBuffer[i]);
 #endif
 
-        Received(&recvBuffer[0], n, sockfd);
+        sock_Received(sockfd, &recvBuffer[0], n);
     }
     return n;
 }
 
-int Sock_Task()
+int Sock_Task(sockfd_t sockfd)
 {
-    return Receive();
+    return Receive(sockfd);
 }
 
-int Sock_Close(int16_t sockfd)
+int Sock_Close(sockfd_t sockfd)
 {
-    if(sockfd>=0)
+    LOG_INFO("socket:%d", sockfd);
+    if(0 <= sockfd)
     {
-        close(sockfd);
+        if(0 > close(sockfd))
+        {
+            LOG_ERROR("failed to close socked");
+        }
     }
     return 0;
 }
