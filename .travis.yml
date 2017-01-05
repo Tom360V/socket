@@ -1,0 +1,19 @@
+language: cpp
+sudo: false
+
+addons:
+  apt:
+    packages:
+      - cmake
+      - check
+      - subunit
+
+compiler:
+  - gcc
+  - clang
+
+script:
+  - mkdir -p bld
+  - cd bld
+  - cmake ..
+  - make
