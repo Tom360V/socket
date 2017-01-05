@@ -9,13 +9,11 @@ project (mySocket)
 include_directories("inc")
 
 
-#Add sources
-set(srcs src/mysocket_x86.c)
-
-
 #Add Library
-add_library(mysocket_86 SHARED ${srcs})
+add_library(mySocket_x86 SHARED src/mysocket_x86.c)
+add_library(client       SHARED src/clientSocket.c)
 
+target_link_libraries(client mySocket_x86)
 #######################################
 
 #if (TEST)
