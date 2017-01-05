@@ -11,7 +11,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#define WINDOWS
+//#define WINDOWS
 
 #ifdef WINDOWS
   #include <winsock2.h>
@@ -26,7 +26,7 @@
   #include <netinet/in.h>
   #include <netdb.h>
   #include <sys/ioctl.h>
-  #define ioctl ioctlsocket
+  #define ioctlsocket ioctl
 #endif
 #include "mysocket.h"
 
@@ -353,7 +353,9 @@ int Sock_Send(sockfd_t sockfd, uint8_t *data, size_t length)
     int n = send ((int)sockfd, (char*)data, (size_t)length, 0);
     if (0 > n )
     {
+#ifdef WINDOWS
         LOG_ERROR("failed to send, send:%d (lastError:%d)", n, WSAGetLastError());
+#endif
         return eSOCK_FAILED_TO_SEND;
     }
     LOG_INFO("Send Completed [%d]!", n);
